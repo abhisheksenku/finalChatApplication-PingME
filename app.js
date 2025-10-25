@@ -24,6 +24,9 @@ const models = require("./models/associations");
 // The 'authRoutes' variable now holds the Express router "mini-application"
 // that you defined, which contains all your auth-related endpoints (like /signup, /login).
 const authRoutes = require("./routes/authRoutes");
+const chatRoutes = require("./routes/chatRoutes");
+const contactRoutes = require("./routes/contactRoutes");
+const userRoutes = require('./routes/userRoutes');
 // ================== 2. INITIALIZATION ==================
 // Creates an Express application instance
 // This must come after requiring express
@@ -54,7 +57,11 @@ app.use(express.static(path.join(__dirname, "public")));
 // Examples:
 // A POST request to '/api/auth/login' -> goes to the '/login' handler in authRoutes.
 // A POST request to '/api/auth/signup' -> goes to the '/signup' handler in authRoutes.
+app.use("/api/user", userRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/chat",chatRoutes);
+app.use("/api/contacts",contactRoutes);
+
 /**
  * Route:   GET /
  * Purpose: Serves the main landing page (the "page.html" file).
@@ -130,7 +137,7 @@ app.get("/chat", userAuthenticate.authenticate, (req, res) => {
 (async () => {
     try {
         // Synchronizes Sequelize models with the database (force: true drops & recreates tables)
-        await database.sync({ force: true });
+        await database.sync({ force: false });
 
         // Starts the Express server and listens on the specified port
         // Hoisting note: app and port are both already declared and initialized above, so accessible here
