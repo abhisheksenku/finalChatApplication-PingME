@@ -10,7 +10,11 @@ const path = require("path");
 // Imports cookie-parser middleware to read cookies from incoming requests
 const cookieParser = require("cookie-parser");
 
-///////////////// Custom files
+///////////////// Custom files//////////
+// Imports the authentication middleware from the './middleware/auth.js' file.
+// 'userAuthenticate' will likely contain the 'authenticate' function
+// used to protect routes and verify the user's JWT token.
+const userAuthenticate = require('./middleware/auth');
 // Imports a custom module that initializes and exports a Sequelize database connection
 const database = require("./utilities/sql");
 // Imports your Sequelize model associations (ensures relationships between models are set up)
@@ -103,6 +107,22 @@ app.get("/signup", (req, res) => {
  */
 app.get("/login", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "login.html"));
+});
+/**
+ * Route:   GET /chat
+ * Purpose: Serves the main chat application page.
+ * Middleware: `userAuthenticate.authenticate`
+ * - This route is **protected**. The `authenticate` middleware runs *first*.
+ * - If the user is not authenticated (e.g., no valid token), the middleware
+ * will block the request (e.g., redirect to /login).
+ * - If the user *is* authenticated, it calls `next()` and allows the
+ * request to proceed to the next function.
+ * Logic:
+ * - Once authenticated, this function runs and sends the main
+ * `chat.html` file to the user's browser.
+ */
+app.get("/chat", userAuthenticate.authenticate, (req, res) => {
+  res.sendFile(path.join(__dirname, "views", "chat.html"));
 });
 // ================== 6. SERVER STARTUP ==================
 // Immediately Invoked Async Function Expression (IIFE)
