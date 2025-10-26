@@ -602,6 +602,21 @@ button {
   color: var(--text-color);
   word-wrap: break-word;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  /* This is your "default width" for short messages */
+  min-width: 150px;
+  /* This is your max width for long messages */
+  max-width: 65%;
+  
+  /* This makes the bubble shrink-to-fit its content */
+  width: fit-content;
+  /* Turn the bubble into a flex container */
+  display: flex;
+  
+  /* Allow text and metadata to wrap if the screen is tiny */
+  flex-wrap: wrap; 
+  
+  /* Align the bottom of the text with the bottom of the metadata */
+  align-items: flex-end;
 }
 
 .message-content .chat-attached-image {
@@ -611,7 +626,11 @@ button {
   display: block;
   max-width: 250px;
 }
-
+.message-content .chat-attached-image,
+.message-content .file-message-container {
+  margin: 0;
+  padding-right: 10px;
+}
 .message.sent {
   align-self: flex-end;
   flex-direction: row-reverse;
@@ -2189,16 +2208,10 @@ body.dark .contact-badge {
 }
 /* In public/css/chat.css */
 
-.message-content {
-  position: relative;
-  /* Add padding to the bottom to make space for the time */
-  padding-bottom: 20px;
-}
-
 /* This targets text messages specifically */
 .message-content p {
   margin: 0;
-  padding: 0;
+  padding: 10px;
 }
 
 /* This is the new container for the time and status */
@@ -2210,8 +2223,19 @@ body.dark .contact-badge {
   color: var(--text-color-light);
   display: flex;
   align-items: center;
+  margin-left: auto;
+  
+  /* Prevents "11:30 AM" from breaking into two lines */
+  white-space: nowrap;
+  
+  /* Styling for the text itself */
+  font-size: 0.8em;
+  color: #888;
 }
-
+/* For sent messages, make the meta text lighter */
+.message.sent .message-meta {
+  color: #e0e0e0;
+}
 /* For received messages, the time is a bit darker */
 .message.received .message-meta {
   color: #a0a0a0;

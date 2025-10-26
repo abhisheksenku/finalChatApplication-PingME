@@ -27,6 +27,7 @@ const authRoutes = require("./routes/authRoutes");
 const chatRoutes = require("./routes/chatRoutes");
 const contactRoutes = require("./routes/contactRoutes");
 const userRoutes = require('./routes/userRoutes');
+const groupRoutes = require('./routes/groupRoutes');
 // ================== 2. INITIALIZATION ==================
 // Creates an Express application instance
 // This must come after requiring express
@@ -61,7 +62,7 @@ app.use("/api/user", userRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/chat",chatRoutes);
 app.use("/api/contacts",contactRoutes);
-
+app.use("/api/group", groupRoutes)
 /**
  * Route:   GET /
  * Purpose: Serves the main landing page (the "page.html" file).
