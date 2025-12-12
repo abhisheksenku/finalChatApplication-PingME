@@ -12,12 +12,8 @@ const GroupMessage = sequelize.define('GroupMessage', {
     allowNull: true,
   },
   type: {
-    type: DataTypes.ENUM('text', 'image', 'file', 'link'),
+    type: DataTypes.ENUM('text', 'image', 'file', 'media'),
     defaultValue: 'text',
-  },
-  content: {
-    type: DataTypes.JSON, // For storing file URL, metadata, etc.
-    allowNull: true,
   },
   // Foreign key for replies, creating a self-referencing relationship
   parentMessageId: {
@@ -28,9 +24,26 @@ const GroupMessage = sequelize.define('GroupMessage', {
       key: 'id'
     },
     onDelete: 'SET NULL'
+  },
+  // This is the Foreign Key that links to the new Media table
+  mediaId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: "Media", // Table name for Media
+      key: "id",
+    },
+    onDelete: "SET NULL",
   }
 }, {
   timestamps: true,
+  indexes: [
+      {
+        // This index makes fetching a group's chat instantaneous
+        name: "group_chat_index",
+        fields: ["groupId", "createdAt"],
+      },
+    ],
 });
 
 module.exports = GroupMessage;

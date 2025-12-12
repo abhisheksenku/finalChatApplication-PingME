@@ -2269,3 +2269,42 @@ body.dark .contact-badge {
   color: var(--text-color-light);
   font-size: 0.75rem; /* Make clock icon smaller */
 }
+/*
+  Styles for putting the sender's name inside the message bubble
+*/
+
+/* Target the name only in received group messages.
+  This ensures it doesn't try to show a name on 1-to-1 chats.
+*/
+.message.received .message-sender-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #695cfe; /* Use your theme's primary color */
+  margin-bottom: 4px;
+  display: block; /* Make it a block element */
+}
+
+/* If a text message follows the name, remove its top margin.
+  This makes the spacing look natural.
+*/
+.message.received .message-sender-name + p {
+  margin-top: 0;
+}
+
+/* Make sure the name also looks good above images/files.
+  This adds a little space.
+*/
+.message.received .message-sender-name + .chat-attached-image,
+.message.received .message-sender-name + .file-message-container {
+  margin-top: 4px;
+}
+#add-member-search {
+  width: 100%;
+  padding: 12px 12px 12px 40px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: #f9f9f9;
+  font-size: 0.95rem;
+  box-sizing: border-box;
+  color: var(--text-color); /* <-- ADD THIS LINE */
+}

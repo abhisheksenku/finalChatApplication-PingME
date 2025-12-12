@@ -6,10 +6,16 @@ const {
   GroupMessageReaction,
   Contact,
   HiddenGroupMessage,
-  UnreadCount, 
+  UnreadCount,
+  Media,
 } = require("../models/associations");
 const { Op } = require("sequelize");
 const sequelize = require("../utilities/sql");
+const { uploadToS3 } = require('../services/s3Service');
+const fs = require('fs/promises');
+const path = require('path');
+
+
 const createGroup = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -58,6 +64,19 @@ const createGroup = async (req, res) => {
     }
 
     await transaction.commit();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+
+    // Fetch the full group details to send
+    const groupData = await Group.findByPk(newGroup.id);
+
+    const newMemberIds = members.map((id) => parseInt(id, 10));
+
+    // 2. Emit "addedToGroup" to each user's personal room
+    newMemberIds.forEach((memberId) => {
+      const userRoom = `user_${memberId}`;
+      io.to(userRoom).emit("addedToGroup", groupData.toJSON());
+    });
 
     // Frontend expects the new group object directly as the response
     res.status(201).json(newGroup);
@@ -188,6 +207,15 @@ const updateGroupDetails = async (req, res) => {
 
     // 5. Save the changes to the database
     await group.save();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${group.id}`;
+
+    // Emit to everyone in the room that the group's info has changed
+    io.to(groupRoom).emit("groupDetailsUpdated", {
+      groupId: group.id,
+      newDetails: group.toJSON(),
+    });
 
     // 6. Send a success response with the updated group data
     res
@@ -269,6 +297,21 @@ const addMembersToGroup = async (req, res) => {
     // --- END OF THE FIX ---
 
     await transaction.commit();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${groupId}`;
+
+    // 1. Get the group data to send
+    const groupData = await Group.findByPk(groupId);
+
+    // 2. Notify the *newly added* users via their personal rooms
+    userIds.forEach((userId) => {
+      const userRoom = `user_${userId}`;
+      io.to(userRoom).emit("addedToGroup", groupData.toJSON());
+    });
+
+    // 3. Notify all *existing* members to refresh their member list
+    io.to(groupRoom).emit("groupMembersUpdated", { groupId: groupId });
 
     res.status(201).json({
       message: `Successfully updated members.`,
@@ -332,6 +375,19 @@ const removeMemberFromGroup = async (req, res) => {
 
     // 6. Remove the member
     await memberToRemove.destroy();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${groupId}`;
+    const removedUserRoom = `user_${memberIdToRemove}`;
+
+    // 1. Tell the removed user they've been kicked
+    io.to(removedUserRoom).emit("removedFromGroup", {
+      groupId: groupId,
+      groupName: group.name,
+    });
+
+    // 2. Tell the remaining members to refresh their list
+    io.to(groupRoom).emit("groupMembersUpdated", { groupId: groupId });
 
     res
       .status(200)
@@ -401,6 +457,12 @@ const updateMemberRole = async (req, res) => {
     // 7. Update the member's role
     memberToUpdate.role = role;
     await memberToUpdate.save();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${groupId}`;
+
+    // Tell everyone in the group to refresh their member list
+    io.to(groupRoom).emit("groupMembersUpdated", { groupId: groupId });
 
     res.status(200).json({
       message: "Member role updated successfully.",
@@ -450,6 +512,12 @@ const leaveGroup = async (req, res) => {
     }
     // Delete the membership record
     await membership.destroy();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${groupId}`;
+
+    // Tell the remaining members to refresh their list
+    io.to(groupRoom).emit("groupMembersUpdated", { groupId: groupId });
 
     res.status(200).json({ message: "You have left the group." });
   } catch (error) {
@@ -485,67 +553,18 @@ const deleteGroup = async (req, res) => {
     // Sequelize's 'destroy' will delete the group.
     // Your database should be set up with "ON DELETE CASCADE" for related
     // messages and memberships to be deleted automatically.
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
+    const groupRoom = `group_${groupId}`;
+
+    // Tell everyone in the room the group is being deleted *before* it's gone
+    io.to(groupRoom).emit("groupDeleted", { groupId: groupId });
     await group.destroy();
 
     res.status(200).json({ message: "Group deleted successfully." });
   } catch (error) {
     console.error("Error deleting group:", error);
     res.status(500).json({ message: "Failed to delete group." });
-  }
-};
-
-const sendGroupMessage = async (req, res) => {
-  try {
-    const senderId = req.user.id;
-    // Get groupId from the body, not params
-    const { groupId, message, type = "text", content = null } = req.body;
-
-    if (!groupId) {
-      return res.status(400).json({ message: "Group ID is required." });
-    }
-    if (!message && type === "text") {
-      return res
-        .status(400)
-        .json({ message: "Message content cannot be empty." });
-    }
-
-    const group = await Group.findByPk(groupId, {
-      include: [
-        {
-          model: GroupMember,
-          where: { userId: senderId },
-          required: false,
-        },
-      ],
-    });
-
-    if (!group) {
-      return res.status(404).json({ message: "Group not found." });
-    }
-
-    const member = group.GroupMembers ? group.GroupMembers[0] : null;
-
-    if (!member) {
-      return res
-        .status(403)
-        .json({ message: "You are not a member of this group." });
-    }
-
-    // (Permission check logic can be added here if needed)
-
-    const newMessage = await GroupMessage.create({
-      senderId,
-      groupId,
-      message,
-      type,
-      content,
-    });
-
-    // Frontend expects the new message object directly
-    res.status(201).json(newMessage);
-  } catch (error) {
-    console.error("Error sending group message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
   }
 };
 
@@ -606,198 +625,10 @@ const getGroupConversation = async (req, res) => {
   }
 };
 
-const editGroupMessage = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { message } = req.body;
-
-    // 1. Validation: New message content is required
-    if (!message || message.trim() === "") {
-      return res
-        .status(400)
-        .json({ message: "New message content cannot be empty." });
-    }
-
-    // 2. Find the message to be edited
-    const groupMessage = await GroupMessage.findByPk(messageId);
-    if (!groupMessage) {
-      return res.status(404).json({ message: "Message not found." });
-    }
-
-    // 3. Authorization Check: Ensure the user is the original sender
-    if (groupMessage.senderId !== currentUserId) {
-      return res
-        .status(403)
-        .json({ message: "You are not authorized to edit this message." });
-    }
-
-    // 4. Update the message content
-    groupMessage.message = message.trim();
-    await groupMessage.save();
-
-    // 5. Send a success response with the updated message
-    res.status(200).json(groupMessage);
-  } catch (error) {
-    console.error("Error editing group message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-const reactToGroupMessage = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { reaction } = req.body;
-
-    // 1. Validation: Reaction content is required
-    if (!reaction || reaction.trim() === "") {
-      return res
-        .status(400)
-        .json({ message: "Reaction content cannot be empty." });
-    }
-
-    // 2. Find the message and include its group ID
-    const groupMessage = await GroupMessage.findByPk(messageId, {
-      attributes: ["id", "groupId"],
-    });
-    if (!groupMessage) {
-      return res.status(404).json({ message: "Message not found." });
-    }
-
-    // 3. Authorization Check: Verify the user is a member of the group
-    const member = await GroupMember.findOne({
-      where: {
-        groupId: groupMessage.groupId,
-        userId: currentUserId,
-      },
-    });
-    if (!member) {
-      return res.status(403).json({
-        message: "You are not authorized to react to messages in this group.",
-      });
-    }
-
-    // 4. Use findOrCreate to add the reaction or find it if it already exists
-    const [newReaction, created] = await GroupMessageReaction.findOrCreate({
-      where: {
-        groupMessageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
-      defaults: {
-        groupMessageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
-    });
-
-    const statusCode = created ? 201 : 200;
-    const responseMessage = created
-      ? "Reaction added successfully."
-      : "You have already added this reaction.";
-
-    res
-      .status(statusCode)
-      .json({ message: responseMessage, reaction: newReaction });
-  } catch (error) {
-    console.error("Error reacting to group message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-const removeGroupMessageReaction = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { reaction } = req.body;
-
-    // 1. Validation: Reaction content is required
-    if (!reaction || reaction.trim() === "") {
-      return res.status(400).json({ message: "Reaction content is required." });
-    }
-
-    // 2. Find the reaction record to be deleted
-    const reactionRecord = await GroupMessageReaction.findOne({
-      where: {
-        groupMessageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
-    });
-
-    // 3. If no record is found, the reaction doesn't exist for this user
-    if (!reactionRecord) {
-      return res
-        .status(404)
-        .json({ message: "Reaction not found or you are not the owner." });
-    }
-
-    // 4. Delete the reaction
-    await reactionRecord.destroy();
-
-    // 5. Send a success response
-    res.status(200).json({ message: "Reaction removed successfully." });
-  } catch (error) {
-    console.error("Error removing group message reaction:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-const deleteGroupMessage = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    // Read the boolean flag from the query string, just like the individual chat
-    const forEveryone = req.query.forEveryone === "true";
-
-    const groupMessage = await GroupMessage.findByPk(messageId);
-    if (!groupMessage) {
-      return res.status(404).json({ message: "Group message not found." });
-    }
-
-    if (forEveryone) {
-      // --- Logic for "Delete for Everyone" ---
-      // Authorization Check: Must be the original sender
-      if (groupMessage.senderId !== currentUserId) {
-        return res.status(403).json({
-          message:
-            "You are not authorized to delete this message for everyone.",
-        });
-      }
-      // Permanently delete the message
-      await groupMessage.destroy();
-      return res
-        .status(200)
-        .json({ message: "Group message deleted for everyone." });
-    } else {
-      // --- Logic for "Delete for Me" (hiding) ---
-      // Authorization Check: Must be a member of the group
-      const member = await GroupMember.findOne({
-        where: {
-          groupId: groupMessage.groupId,
-          userId: currentUserId,
-        },
-      });
-      if (!member) {
-        return res.status(403).json({
-          message: "You are not authorized to hide messages in this group.",
-        });
-      }
-      // Hide the message for the current user
-      await HiddenGroupMessage.findOrCreate({
-        where: {
-          groupMessageId: messageId,
-          userId: currentUserId,
-        },
-      });
-      return res.status(200).json({ message: "Group message hidden for you." });
-    }
-  } catch (error) {
-    console.error("Error deleting group message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-
 const getAddableFriends = async (req, res) => {
   try {
+    const io = req.app.get("socketio");
+
     const { groupId } = req.params;
     const currentUserId = req.user.id;
 
@@ -818,18 +649,19 @@ const getAddableFriends = async (req, res) => {
         ],
       },
       include: [
-        { model: User, as: "requester", attributes: ["id", "name", "img"] },
-        { model: User, as: "addressee", attributes: ["id", "name", "img"] },
+        { model: User, as: "Requester", attributes: ["id", "name", "img"] },
+        { model: User, as: "Addressee", attributes: ["id", "name", "img"] },
       ],
     });
 
     // 3. Extract the friend 'User' object from each contact record.
-    const friends = contacts.map((contact) => {
-      // This logic correctly identifies the other user based on your aliases
-      return contact.requesterId === currentUserId
-        ? contact.addressee
-        : contact.requester;
-    });
+    const friends = contacts
+      .map((contact) => {
+        return contact.requesterId === currentUserId
+          ? contact.Addressee
+          : contact.Requester;
+      })
+      .filter((friend) => friend != null);
 
     // 4. Filter out friends who are already members.
     const addableFriends = friends.filter(
@@ -843,30 +675,29 @@ const getAddableFriends = async (req, res) => {
   }
 };
 const getMembershipStatus = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const groupId = req.params.groupId;
+  try {
+    const userId = req.user.id;
+    const groupId = req.params.groupId;
 
-        const membership = await GroupMember.findOne({
-            where: {
-                userId: userId,
-                groupId: groupId
-            }
-        });
+    const membership = await GroupMember.findOne({
+      where: {
+        userId: userId,
+        groupId: groupId,
+      },
+    });
 
-        if (membership) {
-            // If a record is found, send it back.
-            return res.status(200).json(membership);
-        } else {
-            // If the user is not a member, it's not an error, they just don't have a record.
-            // Sending 404 is appropriate here, the frontend will catch it.
-            return res.status(404).json({ message: "Membership not found." });
-        }
-
-    } catch (error) {
-        console.error("Error fetching membership status:", error);
-        res.status(500).json({ message: "Server error." });
+    if (membership) {
+      // If a record is found, send it back.
+      return res.status(200).json(membership);
+    } else {
+      // If the user is not a member, it's not an error, they just don't have a record.
+      // Sending 404 is appropriate here, the frontend will catch it.
+      return res.status(404).json({ message: "Membership not found." });
     }
+  } catch (error) {
+    console.error("Error fetching membership status:", error);
+    res.status(500).json({ message: "Server error." });
+  }
 };
 const markGroupAsRead = async (req, res) => {
   try {
@@ -896,9 +727,148 @@ const markGroupAsRead = async (req, res) => {
     // 4. Send a success response
     // We send 200 OK even if there was nothing to update (idempotent)
     res.status(200).json({ message: "Group marked as read." });
-    
   } catch (error) {
     console.error("Error marking group as read:", error);
+    res.status(500).json({ message: "An internal server error occurred." });
+  }
+};
+// const sendGroupFile = async (req, res) => {
+//   try {
+//     const senderId = req.user.id;
+//     const { groupId } = req.body;
+
+//     // 1. Validation
+//     if (!req.file) {
+//       return res.status(400).json({ message: "No file was uploaded." });
+//     }
+//     if (!groupId) {
+//       return res.status(400).json({ message: "Group ID is required." });
+//     }
+
+//     // 2. Security Check: Is the user a member of this group?
+//     const member = await GroupMember.findOne({
+//       where: { userId: senderId, groupId: groupId },
+//     });
+//     if (!member) {
+//       return res
+//         .status(403)
+//         .json({ message: "You are not a member of this group." });
+//     }
+
+//     // 3. Create the Media record (based on our new schema)
+//     const newMedia = await Media.create({
+//       url: `/uploads/${req.file.filename}`, // Path from multer
+//       mimetype: req.file.mimetype,
+//       fileSize: req.file.size,
+//       originalName: req.file.originalname,
+//       uploadedByUserId: senderId,
+//     });
+
+//     // 4. Create the Group Message, linking to the Media
+//     const newGroupMessage = await GroupMessage.create({
+//       senderId,
+//       groupId: parseInt(groupId, 10),
+//       type: "media", // Use our new 'media' type
+//       mediaId: newMedia.id, // Link to the new media
+//       message: req.file.originalname, // Store original name as 'message'
+//     });
+
+//     // 5. Fetch the full message with Sender and Media info
+//     const messageWithDetails = await GroupMessage.findByPk(newGroupMessage.id, {
+//       include: [
+//         { model: User, as: "Sender", attributes: ["id", "name", "img"] },
+//         { model: Media, as: "Media" }, // Include the Media data
+//       ],
+//     });
+
+//     // --- WEBSOCKET NOTIFICATION ---
+//     const io = req.app.get("socketio");
+//     const groupRoom = `group_${groupId}`;
+
+//     // 6. Emit the new message to everyone in the group
+//     io.to(groupRoom).emit("newMessage", messageWithDetails.toJSON());
+//     // --- END WEBSOCKET NOTIFICATION ---
+
+//     // 7. Send the new message back to the *uploader*
+//     res.status(201).json(messageWithDetails);
+//   } catch (error) {
+//     console.error("Error sending group file:", error);
+//     res.status(500).json({ message: "An internal server error occurred." });
+//   }
+// };
+const sendGroupFile = async (req, res) => {
+  try {
+    const senderId = req.user.id;
+    const { groupId } = req.body;
+    const io = req.app.get('socketio');
+
+    // 1. Validation
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file was uploaded.' });
+    }
+    if (!groupId) {
+      return res.status(400).json({ message: 'Group ID is required.' });
+    }
+
+    // 2. Security Check
+    const member = await GroupMember.findOne({ where: { userId: senderId, groupId: groupId } });
+    if (!member) {
+      return res.status(403).json({ message: "You are not a member of this group." });
+    }
+    
+    let fileURL;
+
+    // 3. Upload Logic (Hybrid)
+    if (process.env.NODE_ENV === 'production') {
+      // --- PRODUCTION: Upload to S3 ---
+      const localFilePath = req.file.path;
+      const fileData = await fs.readFile(localFilePath);
+      const s3FileName = `groups/group_${groupId}/media/${req.file.filename}`;
+
+      fileURL = await uploadToS3(fileData, s3FileName, req.file.mimetype);
+      
+      await fs.unlink(localFilePath); // Clean up local file
+      
+    } else {
+      // --- DEVELOPMENT: Use Local URL ---
+      const localPath = req.file.path.replace(/\\/g, '/');
+      fileURL = `${process.env.APP_BASE_URL}/${localPath}`;
+    }
+
+    // 4. Create Media & Message records
+    const newMedia = await Media.create({
+      url: fileURL,
+      mimetype: req.file.mimetype,
+      fileSize: req.file.size,
+      originalName: req.file.originalname,
+      uploadedByUserId: senderId,
+    });
+
+    const newGroupMessage = await GroupMessage.create({
+      senderId,
+      groupId: parseInt(groupId, 10),
+      type: req.file.mimetype.startsWith("image") ? "image" : "file",
+      mediaId: newMedia.id,
+      message: req.file.originalname,
+    });
+
+    // 5. Fetch full details for socket
+    const messageWithDetails = await GroupMessage.findByPk(newGroupMessage.id, {
+      include: [
+        { model: User, as: 'Sender', attributes: ['id', 'name', 'img'] }, // Use capital 'S'
+        { model: Media, as: "Media" } // Use capital 'M'
+      ]
+    });
+
+    // 6. Emit real-time update
+    const groupRoom = `group_${groupId}`;
+    io.to(groupRoom).emit("newMessage", messageWithDetails.toJSON());
+
+    // 7. Respond to the uploader
+    res.status(201).json(messageWithDetails);
+
+  } catch (error) {
+    console.error("Error sending group file:", error);
     res.status(500).json({ message: "An internal server error occurred." });
   }
 };
@@ -912,14 +882,10 @@ module.exports = {
   updateMemberRole,
   leaveGroup,
   deleteGroup,
-  sendGroupMessage,
   getGroupConversation,
-  editGroupMessage,
-  reactToGroupMessage,
-  removeGroupMessageReaction,
-  deleteGroupMessage,
   getGroupMembers,
   getAddableFriends,
   getMembershipStatus,
-  markGroupAsRead
+  markGroupAsRead,
+  sendGroupFile,
 };

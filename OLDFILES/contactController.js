@@ -8,7 +8,6 @@ const {
 
 // Helper function to extract the "friend" from a contact object
 const getOtherUser = (contact, userId) => {
-  // Use the correct Uppercase aliases
   return contact.requesterId === userId ? contact.Addressee : contact.Requester;
 };
 
@@ -16,6 +15,7 @@ const getOtherUser = (contact, userId) => {
 const getFriends = async (req, res) => {
   try {
     const userId = req.user.id;
+    console.log("Contact Model Associations:", Contact.associations);
 
     const contacts = await Contact.findAll({
       where: {
@@ -25,25 +25,33 @@ const getFriends = async (req, res) => {
       include: [
         {
           model: User,
-          as: "Requester", // Correct alias
+          as: "Requester",
           attributes: ["id", "name", "email", "img", "isOnline", "status"],
         },
         {
           model: User,
-          as: "Addressee", // Correct alias
+          as: "Addressee",
           attributes: ["id", "name", "email", "img", "isOnline", "status"],
         },
       ],
     });
+
+    console.log("Contacts Found:", JSON.stringify(contacts, null, 2));
 
     // 1. Get the list of friend objects
     const friendsList = contacts
       .map((contact) => {
         return getOtherUser(contact, userId);
       })
-      .filter((friend) => friend != null); // Filter out nulls if a user was deleted
+      .filter((friend) => friend != null);
 
+    console.log(
+      "Friends List (before ID map):",
+      JSON.stringify(friendsList, null, 2)
+    );
     const friendIds = friendsList.map((friend) => friend.id);
+
+    console.log("Friend IDs for Unread Query:", friendIds);
 
     // 2. Fetch all unread counts for these friends
     const unreadCounts = await UnreadCount.findAll({
@@ -70,19 +78,25 @@ const getFriends = async (req, res) => {
             include: [
               {
                 model: User,
-                as: "Sender", // Correct alias
+                as: "Sender",
                 attributes: ["id", "name", "img"],
               },
             ],
           });
 
-          return { friendId: friendId, lastMessage: lastMessage };
+          return {
+            friendId: friendId,
+            lastMessage: lastMessage,
+          };
         } catch (error) {
           console.error(
             `Error fetching last message for friend ${friendId}:`,
             error
           );
-          return { friendId: friendId, lastMessage: null };
+          return {
+            friendId: friendId,
+            lastMessage: null,
+          };
         }
       })
     );
@@ -102,37 +116,14 @@ const getFriends = async (req, res) => {
     const friendsWithData = friendsList.map((friend) => {
       const lastMessage = lastMessageMap[friend.id];
 
-      // Fix: Generate proper placeholder based on actual name
-      let userImg = friend.img;
-
-      // If it's the default placeholder with 'U', create a personalized one
-      if (
-        userImg &&
-        userImg.includes("placehold.co") &&
-        userImg.includes("text=U")
-      ) {
-        const firstLetter = friend.name ? friend.name[0].toUpperCase() : "U";
-        userImg = `https://placehold.co/50x50/695cfe/ffffff?text=${firstLetter}`;
-      }
-      // If no image exists, create personalized placeholder
-      else if (!userImg) {
-        const firstLetter = friend.name ? friend.name[0].toUpperCase() : "U";
-        userImg = `https://placehold.co/50x50/695cfe/ffffff?text=${firstLetter}`;
-      }
-
       return {
         ...friend.toJSON(),
-        img: userImg,
         unreadCount: countMap[friend.id] || 0,
-        messages: lastMessage ? [lastMessage] : [],
-        lastMessage: lastMessage,
+        messages: lastMessage ? [lastMessage] : [], // Convert to messages array for frontend
+        lastMessage: lastMessage, // Also keep as separate property if needed
       };
     });
 
-    console.log(
-      "Friends data sample:",
-      JSON.stringify(friendsWithData[0], null, 2)
-    );
     res.status(200).json({ friends: friendsWithData });
   } catch (error) {
     console.error("Error fetching friends:", error);
@@ -152,15 +143,16 @@ const getReceivedRequests = async (req, res) => {
       include: [
         {
           model: User,
-          as: "Requester", // Correct alias
+          as: "Requester",
           attributes: ["id", "name", "email", "img", "status"],
         },
       ],
     });
 
+    // This mapping is perfect for the frontend
     const receivedRequests = contacts.map((contact) => ({
       ...contact.Requester.toJSON(),
-      Contact: { id: contact.id },
+      Contact: { id: contact.id }, // Provides the requestId
     }));
 
     res.status(200).json({ receivedRequests });
@@ -182,15 +174,16 @@ const getSentRequests = async (req, res) => {
       include: [
         {
           model: User,
-          as: "Addressee", // Correct alias
+          as: "Addressee",
           attributes: ["id", "name", "email", "img", "status"],
         },
       ],
     });
 
+    // This mapping is perfect for the frontend
     const sentRequests = contacts.map((contact) => ({
       ...contact.Addressee.toJSON(),
-      Contact: { id: contact.id },
+      Contact: { id: contact.id }, // Provides the requestId
     }));
 
     res.status(200).json({ sentRequests });
@@ -207,20 +200,17 @@ const getBlockedUsers = async (req, res) => {
     const contacts = await Contact.findAll({
       where: {
         status: "blocked",
-        requesterId: currentUserId,
+        requesterId: currentUserId, // Only show users *I* have blocked
       },
       include: [
         {
           model: User,
-          as: "Addressee", // Correct alias
+          as: "Addressee",
           attributes: ["id", "name", "email", "img", "status"],
         },
       ],
     });
-    // Filter out any null 'addressee' records (if user was deleted)
-    const blockedUsers = contacts
-      .map((contact) => contact.Addressee)
-      .filter(Boolean);
+    const blockedUsers = contacts.map((contact) => contact.addressee);
     res.status(200).json({ blockedUsers });
   } catch (error) {
     console.error("Error while fetching blocked users:", error);
@@ -232,6 +222,7 @@ const getBlockedUsers = async (req, res) => {
 const getAvailableUsers = async (req, res) => {
   try {
     const currentUserId = req.user.id;
+    // 1. Find all users I already have *any* relationship with
     const contacts = await Contact.findAll({
       where: {
         [Op.or]: [
@@ -242,12 +233,16 @@ const getAvailableUsers = async (req, res) => {
       attributes: ["requesterId", "addresseeId"],
     });
 
+    // 2. Create a list of all their IDs
     const relatedUserIds = contacts.flatMap((contact) => [
       contact.requesterId,
       contact.addresseeId,
     ]);
+
+    // 3. Create a final exclusion list (my ID + all related IDs)
     const exclusionList = [...new Set([currentUserId, ...relatedUserIds])];
 
+    // 4. Find all users who are NOT in the exclusion list
     const availableUsers = await User.findAll({
       where: {
         id: { [Op.notIn]: exclusionList },
@@ -265,10 +260,10 @@ const getAvailableUsers = async (req, res) => {
 // POST /api/contacts/send-request/:userId
 const sendFriendRequest = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
     const requesterId = req.user.id;
     const addresseeId = parseInt(req.params.userId, 10);
 
+    // --- Validation logic ---
     if (requesterId === addresseeId) {
       return res
         .status(400)
@@ -298,21 +293,31 @@ const sendFriendRequest = async (req, res) => {
         .status(409)
         .json({ message: "A friend request already exists" });
     }
+    // --- End of validation ---
 
     const newRequest = await Contact.create({
       requesterId,
       addresseeId,
       status: "pending",
     });
+    // --- WEBSOCKET NOTIFICATION ---
+    // 1. Get the io instance from the app
+    const io = req.app.get("socketio");
 
+    // 2. Get the sender's details to send to the recipient
     const sender = await User.findByPk(requesterId, {
-      attributes: ["id", "name", "img", "email", "status"],
+      attributes: ["id", "name", "img", "email", "status"], // Send the full sender object
     });
+
+    // 3. Define the recipient's personal room
     const recipientRoom = `user_${addresseeId}`;
+
+    // 4. Emit the 'newFriendRequest' event ONLY to that user's room
     io.to(recipientRoom).emit("newFriendRequest", {
-      ...sender.toJSON(),
-      Contact: { id: newRequest.id },
+      ...sender.toJSON(), // Send the sender's user data
+      Contact: { id: newRequest.id }, // Include the new request ID
     });
+    // --- END WEBSOCKET NOTIFICATION ---
 
     res.status(201).json({
       message: "Friend request sent successfully.",
@@ -327,10 +332,10 @@ const sendFriendRequest = async (req, res) => {
 // POST /api/contacts/accept/:requestId or /decline/:requestId
 const updateFriendRequest = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
+    const io = req.app.get("socketio");
     const currentUserId = req.user.id;
     const requestId = parseInt(req.params.requestId, 10);
-    const { action } = req.body;
+    const { action } = req.body; // Expecting 'accept' or 'decline'
 
     if (!["accept", "decline"].includes(action)) {
       return res
@@ -356,39 +361,48 @@ const updateFriendRequest = async (req, res) => {
       request.status = "accepted";
       await request.save();
 
-      // Get details for both users
+      // --- WEBSOCKET NOTIFICATION (FOR ACCEPT) ---
+      // 2. Get details of the person who just accepted (the current user)
       const acceptor = await User.findByPk(currentUserId, {
         attributes: ["id", "name", "email", "img", "isOnline", "status"],
       });
+      // 4. Get details of the ORIGINAL SENDER
       const sender = await User.findByPk(request.requesterId, {
         attributes: ["id", "name", "email", "img", "isOnline", "status"],
       });
 
-      // 1. Notify the ORIGINAL SENDER (they get the acceptor as a new friend)
+      // 3. Notify the ORIGINAL SENDER that they have a new friend
       const senderRoom = `user_${request.requesterId}`;
       io.to(senderRoom).emit("friendRequestAccepted", {
         message: `You are now friends with ${acceptor.name}`,
+        // --- START FIX ---
         newFriend: {
-          ...acceptor.toJSON(), // Full user object
+          ...acceptor.toJSON(),
           type: "individual",
           unreadCount: 0,
           lastMessage: null,
           messages: [],
         },
+        // --- END FIX ---
       });
 
-      // 2. Notify the ACCEPTOR (this user) (they get the sender as a new friend)
+      
+
+      // 5. Notify the ACCEPTOR (this user) to update *their* list
       const acceptorRoom = `user_${currentUserId}`;
       io.to(acceptorRoom).emit("newFriendAdded", {
         message: `You are now friends with ${sender.name}`,
+        // --- START FIX ---
         newFriend: {
-          ...sender.toJSON(), // Full user object
+          ...sender.toJSON(),
           type: "individual",
           unreadCount: 0,
           lastMessage: null,
           messages: [],
         },
+        // --- END FIX ---
       });
+      // --- END WEBSOCKET NOTIFICATION ---
 
       return res
         .status(200)
@@ -396,6 +410,8 @@ const updateFriendRequest = async (req, res) => {
     } else {
       // action === 'decline'
       await request.destroy();
+      // --- WEBSOCKET NOTIFICATION (FOR DECLINE) ---
+      // Notify the original sender that their request was declined
       const senderRoom = `user_${request.requesterId}`;
       io.to(senderRoom).emit("friendRequestDeclined", { requestId: requestId });
       return res.status(200).json({ message: "Friend request declined." });
@@ -409,7 +425,6 @@ const updateFriendRequest = async (req, res) => {
 // POST /api/contacts/unfriend/:userId
 const removeFriend = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
     const currentUserId = req.user.id;
     const friendId = parseInt(req.params.userId, 10);
     const friendship = await Contact.findOne({
@@ -428,8 +443,13 @@ const removeFriend = async (req, res) => {
         .json({ message: "You are not friends with this user." });
     }
     await friendship.destroy();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
     const friendRoom = `user_${friendId}`;
+
+    // Tell the other user to remove 'currentUserId' from their friend list
     io.to(friendRoom).emit("friendRemoved", { friendId: currentUserId });
+
     res.status(200).json({ message: "Friend removed successfully." });
   } catch (error) {
     console.error("Error removing friend:", error);
@@ -440,13 +460,13 @@ const removeFriend = async (req, res) => {
 // POST /api/contacts/block/:userId
 const blockUser = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
     const requesterId = req.user.id;
     const addresseeId = parseInt(req.params.userId, 10);
 
     if (requesterId === addresseeId) {
       return res.status(400).json({ message: "You cannot block yourself." });
     }
+
     const addressee = await User.findByPk(addresseeId);
     if (!addressee) {
       return res
@@ -454,6 +474,7 @@ const blockUser = async (req, res) => {
         .json({ message: "The user you are trying to block does not exist." });
     }
 
+    // Find any existing relationship
     const existingContact = await Contact.findOne({
       where: {
         [Op.or]: [
@@ -464,6 +485,8 @@ const blockUser = async (req, res) => {
     });
 
     if (existingContact) {
+      // A relationship exists, just update it to "blocked"
+      // and ensure the requester is the one blocking.
       existingContact.requesterId = requesterId;
       existingContact.addresseeId = addresseeId;
       existingContact.status = "blocked";
@@ -473,12 +496,17 @@ const blockUser = async (req, res) => {
         contact: existingContact,
       });
     } else {
+      // No relationship exists, create a new "blocked" one.
       const newBlockedContact = await Contact.create({
         requesterId,
         addresseeId,
         status: "blocked",
       });
+      // --- WEBSOCKET NOTIFICATION ---
+      const io = req.app.get("socketio");
       const blockedUserRoom = `user_${addresseeId}`;
+
+      // Tell the blocked user's client what happened
       io.to(blockedUserRoom).emit("youWereBlocked", { byUser: requesterId });
       res.status(201).json({
         message: "User blocked successfully.",
@@ -494,7 +522,6 @@ const blockUser = async (req, res) => {
 // POST /api/contacts/cancel-request/:requestId
 const cancelRequest = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
     const requesterId = req.user.id;
     const requestId = parseInt(req.params.requestId, 10);
 
@@ -509,7 +536,11 @@ const cancelRequest = async (req, res) => {
     }
     const addresseeId = request.addresseeId;
     await request.destroy();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
     const recipientRoom = `user_${addresseeId}`;
+
+    // Tell the recipient's client to remove this request from their UI
     io.to(recipientRoom).emit("friendRequestCancelled", {
       requestId: requestId,
     });
@@ -523,10 +554,10 @@ const cancelRequest = async (req, res) => {
 // POST /api/contacts/unblock/:userId
 const unblockUser = async (req, res) => {
   try {
-    const io = req.app.get("socketio"); // Define io
     const currentUserId = req.user.id;
     const blockedUserId = parseInt(req.params.userId, 10);
 
+    // Find the 'blocked' record initiated by the current user
     const contact = await Contact.findOne({
       where: {
         requesterId: currentUserId,
@@ -537,16 +568,24 @@ const unblockUser = async (req, res) => {
 
     if (!contact) {
       return res
-        .status(401)
+        .status(404)
         .json({ message: "Blocked relationship not found." });
     }
 
+    // --- CORRECTED LOGIC ---
+    // Unblocking should just delete the record.
+    // It does not automatically make you friends.
     await contact.destroy();
+    // --- WEBSOCKET NOTIFICATION ---
+    const io = req.app.get("socketio");
     const unblockedUserRoom = `user_${blockedUserId}`;
+
+    // Tell the unblocked user's client they can now interact
     io.to(unblockedUserRoom).emit("youWereUnblocked", {
       byUser: currentUserId,
     });
     res.status(200).json({ message: "User unblocked successfully." });
+    // --- END CORRECTION ---
   } catch (error) {
     console.error("Error unblocking user:", error);
     res.status(500).json({ message: "Internal server error." });

@@ -4,305 +4,258 @@ const {
   Message,
   MessageReaction,
   HiddenMessage,
-  UnreadCount
+  Media
 } = require("../models/associations");
+const { uploadToS3 } = require('../services/s3Service');
+const {io} = require('../app');
+const fs = require('fs/promises');
+const path = require('path');
+require("dotenv").config();
 
-// POST /api/chat/add
-const sendMessage = async (req, res) => {
-  try {
-    const senderId = req.user.id;
-    // Get receiverId from BODY
-    const { receiverId, message, type = "text", content = null } = req.body;
-
-    if (!receiverId) {
-      return res.status(400).json({ message: "Receiver ID is required." });
-    }
-    if (!message && type === "text") {
-      return res
-        .status(400)
-        .json({ message: "Message content cannot be empty." });
-    }
-
-    const newMessage = await Message.create({
-      senderId,
-      receiverId: parseInt(receiverId, 10),
-      message,
-      type,
-      content,
-    });
-
-    // Frontend expects the new message object directly
-    res.status(201).json(newMessage);
-  } catch (error) {
-    console.error("Error sending message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-
-// GET /api/chat/fetch/:userId
 const getConversation = async (req, res) => {
   try {
     const currentUserId = req.user.id;
     const otherUserId = parseInt(req.params.userId, 10);
-    const { before, since } = req.query;
+    const { before } = req.query; // 'since' is no longer needed
 
-    // 1. Get the list of all message IDs this user has hidden.
+    // 1. Get IDs of messages this user has hidden
     const hiddenMessages = await HiddenMessage.findAll({
       where: { userId: currentUserId },
       attributes: ["messageId"],
     });
     const hiddenMessageIds = hiddenMessages.map((h) => h.messageId);
 
+    // 2. Build the query
     const whereClause = {
       [Op.or]: [
         { senderId: currentUserId, receiverId: otherUserId },
         { senderId: otherUserId, receiverId: currentUserId },
       ],
-      // 2. Add the filter to exclude the hidden message IDs.
       id: { [Op.notIn]: hiddenMessageIds },
     };
 
+    // 3. Add infinite scroll logic
     if (before) {
-      whereClause.id[Op.lt] = parseInt(before, 10);
-    }
-    if (since) {
-      whereClause.id[Op.gt] = parseInt(since, 10);
+      whereClause.id = { [Op.lt]: parseInt(before, 10) };
     }
 
+    // 4. Find all messages
     const messages = await Message.findAll({
       where: whereClause,
       order: [["createdAt", "DESC"]],
-      limit: 20,
+      limit: 20, // Load 20 messages at a time
       include: [
         { model: User, as: "Sender", attributes: ["id", "name", "img"] },
-        {
-          model: MessageReaction,
-          include: [{ model: User, attributes: ["id", "name"] }],
-        },
+        { model: MessageReaction, include: [User] }, // Include reactions
+        { model: Media, as: "Media" }, // <-- Include Media data
       ],
     });
 
-    res.status(200).json(messages.reverse());
+    res.status(200).json(messages.reverse()); // Send oldest first
   } catch (error) {
     console.error("Error fetching conversation:", error);
     res.status(500).json({ message: "An internal server error occurred." });
   }
 };
-
-// PUT /api/chat/edit/:messageId
-const editMessage = async (req, res) => {
+// controllers/chatController.js
+const getChatListWithLastMessages = async (req, res) => {
   try {
     const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { message: newMessageContent } = req.body;
 
-    if (!newMessageContent || newMessageContent.trim() === "") {
-      return res
-        .status(400)
-        .json({ message: "New message content cannot be empty." });
-    }
+    // 1. Get all friends
+    const friends = await User.findAll({
+      include: [{
+        model: User,
+        as: 'Friends',
+        through: { where: { userId: currentUserId } },
+        attributes: ['id', 'name', 'email', 'img', 'isOnline'],
+        through: { attributes: [] } // Don't include friendship table data
+      }]
+    });
 
-    const message = await Message.findByPk(messageId);
-    if (!message) {
-      return res.status(404).json({ message: "Message not found." });
-    }
-    if (message.senderId !== currentUserId) {
-      return res
-        .status(403)
-        .json({ message: "You are not authorized to edit this message." });
-    }
+    // 2. For each friend, get the last message
+    const friendsWithLastMessage = await Promise.all(
+      friends.map(async (friend) => {
+        const lastMessage = await Message.findOne({
+          where: {
+            [Op.or]: [
+              { senderId: currentUserId, receiverId: friend.id },
+              { senderId: friend.id, receiverId: currentUserId }
+            ]
+          },
+          order: [['createdAt', 'DESC']],
+          include: [
+            { model: User, as: "Sender", attributes: ["id", "name"] }
+          ]
+        });
 
-    message.message = newMessageContent.trim();
-    await message.save();
+        // 3. Get unread count for this chat
+        const unreadCount = await Message.count({
+          where: {
+            senderId: friend.id,
+            receiverId: currentUserId,
+            status: 'sent' // Or whatever field you use for read status
+          }
+        });
 
-    res.status(200).json(message);
+        return {
+          id: friend.id,
+          name: friend.name,
+          email: friend.email,
+          img: friend.img,
+          isOnline: friend.isOnline,
+          type: 'individual',
+          lastMessage: lastMessage,
+          unreadCount: unreadCount
+        };
+      })
+    );
+
+    res.status(200).json(friendsWithLastMessage);
   } catch (error) {
-    console.error("Error editing message:", error);
+    console.error("Error fetching chat list:", error);
     res.status(500).json({ message: "An internal server error occurred." });
   }
 };
+// ==========================================================
+// NEW: POST /api/chat/add-file
+// This "catches" the file upload from the client.
+// ==========================================================
+// const sendFile = async (req, res) => {
+//   try {
+//     const senderId = req.user.id;
+//     const { receiverId } = req.body;
 
-// DELETE /api/chat/delete/:messageId
-const deleteMessage = async (req, res) => {
+//     // 1. Validation
+//     if (!req.file) {
+//       return res.status(400).json({ message: "No file was uploaded." });
+//     }
+//     if (!receiverId) {
+//       return res.status(400).json({ message: "Receiver ID is required." });
+//     }
+
+//     // 2. Create the Media record (based on our new schema)
+//     const newMedia = await Media.create({
+//       url: `/uploads/${req.file.filename}`, // Path from multer
+//       mimetype: req.file.mimetype,
+//       fileSize: req.file.size,
+//       originalName: req.file.originalname,
+//       uploadedByUserId: senderId,
+//     });
+
+//     // 3. Create the Message, linking to the Media
+//     const newMessage = await Message.create({
+//       senderId,
+//       receiverId: parseInt(receiverId, 10),
+//       type: "media", // Use our new 'media' type
+//       mediaId: newMedia.id, // Link to the new media
+//       message: req.file.originalname, // Store original name
+//       status: "sent",
+//     });
+
+//     // 4. Fetch the full message with Sender and Media info
+//     const messageWithDetails = await Message.findByPk(newMessage.id, {
+//       include: [
+//         { model: User, as: "Sender", attributes: ["id", "name", "img"] },
+//         { model: Media, as: "Media" }, // Include the Media data
+//       ],
+//     });
+
+//     // --- WEBSOCKET NOTIFICATION ---
+//     const io = req.app.get("socketio");
+//     const recipientRoom = `user_${receiverId}`;
+//     const senderRoom = `user_${senderId}`;
+
+//     // 5. Emit the new message to the recipient *and* the sender
+//     // (This notifies the sender's *other* devices, e.g., their phone)
+//     io.to(recipientRoom)
+//       .to(senderRoom)
+//       .emit("newMessage", messageWithDetails.toJSON());
+//     // --- END WEBSOCKET NOTIFICATION ---
+
+//     // 6. Send the new message back to the *uploader*
+//     res.status(201).json(messageWithDetails);
+//   } catch (error) {
+//     console.error("Error sending file:", error);
+//     res.status(500).json({ message: "An internal server error occurred." });
+//   }
+// };
+const sendFile = async (req, res) => {
   try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const forEveryone = req.query.forEveryone === "true";
+    const senderId = req.user.id;
+    const { receiverId } = req.body;
+    const io = req.app.get('socketio'); // Get Socket.IO
 
-    const message = await Message.findByPk(messageId);
-    if (!message) {
-      return res.status(404).json({ message: "Message not found." });
+    // 1. Validation
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file was uploaded.' });
+    }
+    if (!receiverId) {
+      return res.status(400).json({ message: 'Receiver ID is required.' });
     }
 
-    if (forEveryone) {
-      // Logic for "Delete for Everyone"
-      if (message.senderId !== currentUserId) {
-        return res
-          .status(403)
-          .json({
-            message: "You can only delete your own messages for everyone.",
-          });
-      }
-      await message.destroy();
-      return res.status(200).json({ message: "Message deleted for everyone." });
+    let fileURL;
+
+    // 2. Upload Logic (Hybrid)
+    if (process.env.NODE_ENV === 'production') {
+      // --- PRODUCTION: Upload to S3 ---
+      const localFilePath = req.file.path;
+      const fileData = await fs.readFile(localFilePath);
+      const s3FileName = `chats/user_${senderId}/media/${req.file.filename}`;
+
+      fileURL = await uploadToS3(fileData, s3FileName, req.file.mimetype);
+      
+      // Clean up the local file
+      await fs.unlink(localFilePath);
+      
     } else {
-      // Logic for "Delete for Me" (hiding the message)
-      if (
-        message.senderId !== currentUserId &&
-        message.receiverId !== currentUserId
-      ) {
-        return res
-          .status(403)
-          .json({ message: "You are not part of this conversation." });
-      }
-      await HiddenMessage.findOrCreate({
-        where: { userId: currentUserId, messageId: messageId },
-      });
-      return res.status(200).json({ message: "Message hidden for you." });
-    }
-  } catch (error) {
-    console.error("Error deleting message:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-
-// POST /api/chat/react/:messageId
-const reactToMessage = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { reaction } = req.body;
-
-    if (!reaction || reaction.trim() === "") {
-      return res.status(400).json({ message: "Reaction content is required." });
+      // --- DEVELOPMENT: Use Local URL ---
+      console.log("DEBUG: APP_BASE_URL is:", process.env.APP_BASE_URL);
+      const localPath = req.file.path.replace(/\\/g, '/'); // Fix Windows paths
+      fileURL = `${process.env.APP_BASE_URL}/${localPath}`;
     }
 
-    const message = await Message.findByPk(messageId);
-    if (!message) {
-      return res.status(404).json({ message: "Message not found." });
-    }
-
-    if (
-      message.senderId !== currentUserId &&
-      message.receiverId !== currentUserId
-    ) {
-      return res
-        .status(403)
-        .json({ message: "You are not authorized to react to this message." });
-    }
-
-    const [reactionInstance, created] = await MessageReaction.findOrCreate({
-      where: {
-        messageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
-      defaults: {
-        messageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
+    // 3. Create Media & Message records in database
+    const newMedia = await Media.create({
+      url: fileURL,
+      mimetype: req.file.mimetype,
+      fileSize: req.file.size,
+      originalName: req.file.originalname,
+      uploadedByUserId: senderId,
     });
 
-    const statusCode = created ? 201 : 200;
-    const responseMessage = created
-      ? "Reaction added successfully."
-      : "You have already added this reaction.";
-
-    res
-      .status(statusCode)
-      .json({ message: responseMessage, reaction: reactionInstance });
-  } catch (error) {
-    console.error("Error adding reaction:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-
-// DELETE /api/chat/react/:messageId
-const removeReaction = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    const messageId = parseInt(req.params.messageId, 10);
-    const { reaction } = req.body;
-
-    if (!reaction || reaction.trim() === "") {
-      return res
-        .status(400)
-        .json({ message: "Reaction content is required to remove it." });
-    }
-
-    const reactionInstance = await MessageReaction.findOne({
-      where: {
-        messageId: messageId,
-        userId: currentUserId,
-        reaction: reaction.trim(),
-      },
+    const newMessage = await Message.create({
+      senderId,
+      receiverId: parseInt(receiverId, 10),
+      type: req.file.mimetype.startsWith("image") ? "image" : "file",
+      mediaId: newMedia.id,
+      message: req.file.originalname, // Store original name
+      status: "sent",
     });
 
-    if (!reactionInstance) {
-      return res.status(404).json({ message: "Reaction not found." });
-    }
-
-    await reactionInstance.destroy();
-
-    res.status(200).json({ message: "Reaction removed successfully." });
-  } catch (error) {
-    console.error("Error removing reaction:", error);
-    res.status(500).json({ message: "An internal server error occurred." });
-  }
-};
-
-// POST /api/chat/mark-read
-const markMessagesAsRead = async (req, res) => {
-  try {
-    const currentUserId = req.user.id;
-    // This controller expects a 'chatId' from the user you are talking to
-    const { chatId } = req.body;
-
-    if (!chatId) {
-      return res.status(400).json({ message: "A chatId is required." });
-    }
-
-    // Update messages *sent by the other user* to you
-    const [updateCount] = await Message.update(
-      { status: "read" },
-      {
-        where: {
-          senderId: chatId, // From the other user
-          receiverId: currentUserId, // To me
-          status: { [Op.ne]: "read" },
-        },
-      }
-    );
-    
-    // Also, clear the unread count for this chat
-    await UnreadCount.update(
-        { count: 0 },
-        {
-            where: {
-                userId: currentUserId,
-                chatId: chatId,
-                chatType: 'individual'
-            }
-        }
-    );
-
-    res.status(200).json({
-      message: "Messages marked as read successfully.",
-      updatedCount: updateCount,
+    // 4. Fetch full details to send to sockets
+    const messageWithDetails = await Message.findByPk(newMessage.id, {
+      include: [
+        { model: User, as: "Sender", attributes: ["id", "name", "img"] },
+        { model: Media, as: "Media" } // Ensure this alias matches associations.js
+      ],
     });
+
+    // 5. Emit real-time update
+    const recipientRoom = `user_${receiverId}`;
+    const senderRoom = `user_${senderId}`;
+    io.to(recipientRoom).to(senderRoom).emit("newMessage", messageWithDetails.toJSON());
+
+    // 6. Respond to the uploader
+    res.status(201).json(messageWithDetails);
+
   } catch (error) {
-    console.error("Error marking messages as read:", error);
+    console.error("Error sending file:", error);
     res.status(500).json({ message: "An internal server error occurred." });
   }
 };
-
 module.exports = {
-  sendMessage,
   getConversation,
-  editMessage,
-  deleteMessage,
-  reactToMessage,
-  removeReaction,
-  markMessagesAsRead,
+  sendFile,
+  getChatListWithLastMessages
 };

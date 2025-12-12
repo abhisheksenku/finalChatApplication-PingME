@@ -9,7 +9,7 @@ const HiddenMessage = require("./hiddenMessages");
 const Contact = require("./contacts");
 const Status = require("./status"); // Ensure filename matches
 const UnreadCount = require("./unreadCount"); // Ensure filename matches
-
+const Media = require("./media");
 // --- NEW: Import Group Models ---
 const Group = require("./groups");
 const GroupMember = require("./groupMembers");
@@ -165,6 +165,29 @@ Group.belongsTo(GroupMessage, {
   as: "pinnedMessage", // Alias to fetch the pinned message
   constraints: false, // Important if pinnedMessageId can be null initially
 });
+// --- 18. User <-> Media (Uploader) ---
+// A user can upload many media files
+User.hasMany(Media, { 
+  foreignKey: "uploadedByUserId", 
+  as: "UploadedMedia" 
+});
+// A media file belongs to the user who uploaded it
+Media.belongsTo(User, { 
+  foreignKey: "uploadedByUserId", 
+  as: "Uploader" 
+});
+
+// --- 19. Media <-> Message (1-to-1) ---
+// A media file can be used in many messages
+Media.hasMany(Message, { foreignKey: "mediaId", as: "MessageLinks" });
+// A message can have (at most) one media file
+Message.belongsTo(Media, { foreignKey: "mediaId", as: "Media" });
+
+// --- 20. Media <-> GroupMessage ---
+// A media file can be used in many group messages
+Media.hasMany(GroupMessage, { foreignKey: "mediaId", as: "GroupMessageLinks" });
+// A group message can have (at most) one media file
+GroupMessage.belongsTo(Media, { foreignKey: "mediaId", as: "Media" });
 // (Optional: A GroupMessage could potentially be pinned in one Group)
 // GroupMessage.hasOne(Group, { foreignKey: 'pinnedMessageId' });
 
@@ -188,4 +211,5 @@ module.exports = {
   GroupMessage,
   GroupMessageReaction,
   HiddenGroupMessage,
+  Media
 };

@@ -136,10 +136,13 @@ document.addEventListener("DOMContentLoaded", () => {
               `https://placehold.co/40x40/695cfe/ffffff?text=${friend.name[0].toUpperCase()}`
             }" alt="${friend.name}">
             <span class="contact-name">${friend.name}</span>
-            <input type="checkbox" class="add-member-checkbox" data-user-id="${
+            <input type="checkbox" id="add-user-${
               friend.id
-            }">
-        `;
+            }" class="add-member-checkbox" data-user-id="${friend.id}">
+<label for="add-user-${friend.id}" class="custom-checkbox-label">
+    <span class="custom-checkbox"></span>
+</label>
+`;
       addMembersContactList.appendChild(li);
     });
   };

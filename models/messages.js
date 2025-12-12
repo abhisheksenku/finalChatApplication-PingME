@@ -26,16 +26,9 @@ const Message = sequelize.define(
 
     // --- Message Type ---
     type: {
-      type: DataTypes.ENUM("text", "image", "file", "link"),
+      type: DataTypes.ENUM("text", "image", "file", "media"),
       defaultValue: "text", // Default to 'text' if not specified
     },
-
-    // --- File/Media Content ---
-    content: {
-      type: DataTypes.JSON, // Use JSON to store metadata like { url: "...", filename: "..." }
-      allowNull: true,
-    },
-
     // --- Message Status (for Read Receipts) ---
     status: {
       type: DataTypes.ENUM("sent", "delivered", "read"),
@@ -55,12 +48,34 @@ const Message = sequelize.define(
       },
       onDelete: "SET NULL", // If the parent message is deleted, don't delete the reply, just remove the link.
     },
+    // This is the Foreign Key that links to the new Media table
+    mediaId: {
+      type: DataTypes.INTEGER,
+      allowNull: true, // A text message won't have a mediaId
+      references: {
+        model: "Media", // Table name for Media
+        key: "id",
+      },
+      onDelete: "SET NULL", // Don't delete message if media is deleted
+    },
   },
   {
     // --- Model Options ---
     // 'timestamps: true' automatically adds 'createdAt' and 'updatedAt' fields
     // to the table, which is essential for sorting messages chronologically.
     timestamps: true,
+    indexes: [
+      {
+        // This index makes fetching chats between two users instantaneous
+        name: "chat_index",
+        fields: ["senderId", "receiverId", "createdAt"],
+      },
+      {
+        // This covers the reverse chat query
+        name: "chat_index_reverse",
+        fields: ["receiverId", "senderId", "createdAt"],
+      },
+    ],
   }
 );
 

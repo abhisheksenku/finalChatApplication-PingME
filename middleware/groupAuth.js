@@ -3,7 +3,7 @@ const isAdmin = async (req, res, next) => {
   try {
     // By placing the require here, it only runs when the function is called,
     // after all initial modules have loaded.
-    const { GroupMember } = require("../models/association");
+    const { GroupMember } = require("../models/associations");
 
     const { groupId } = req.params;
     const userId = req.user.id;

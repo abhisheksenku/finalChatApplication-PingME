@@ -197,7 +197,7 @@ const loginUser = async (req, res) => {
     // We generate a JWT, which is a secure string that proves who they are.
     // (This 'generateAccessToken' function must be imported from another file).
     const token = generateAccessToken(loggeduser);
-
+    await User.update({ isOnline: true }, { where: { id: loggeduser.id } });
     // --- 6. Send Response ---
     // Send a 200 OK response back to the client.
     res
